@@ -32,6 +32,12 @@ def _supports_email_password(user):
     return 'password' in providers and 'google.com' not in providers
 
 
+class PasswordResetRequestThrottle(AnonRateThrottle):
+    # NFR-03: tối đa 5 yêu cầu gửi OTP mỗi phút từ một IP, chống spam email và dò tài khoản
+    scope = 'password_reset_request'
+    rate = '5/minute'
+
+
 class PasswordResetVerifyThrottle(AnonRateThrottle):
     scope = 'password_reset_verify'
     rate = '20/minute'
@@ -44,6 +50,7 @@ class PasswordResetCompleteThrottle(AnonRateThrottle):
 
 class PasswordResetRequestView(generics.GenericAPIView):
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [PasswordResetRequestThrottle]
 
     def post(self, request):
         email = str(request.data.get('email', '')).strip().lower()
@@ -57,7 +64,8 @@ class PasswordResetRequestView(generics.GenericAPIView):
             get_firebase_app()
             user = firebase_auth.get_user_by_email(email)
         except firebase_auth.UserNotFoundError:
-            raise ValidationError({'email': 'Email ch\u01b0a \u0111\u0103ng k\u00fd.'})
+            # Email ch\u01b0a \u0111\u0103ng k\u00fd: tr\u1ea3 \u0111\u00fang c\u00e2u tr\u1ea3 l\u1eddi nh\u01b0 email h\u1ee3p l\u1ec7 v\u00e0 kh\u00f4ng g\u1eedi mail, \u0111\u1ec3 kh\u00f4ng l\u1ed9 t\u00e0i kho\u1ea3n
+            return Response({'message': response_message}, status=status.HTTP_200_OK)
         except Exception:
             return Response(
                 {'message': 'Dịch vụ đặt lại mật khẩu chưa được cấu hình Firebase Admin.'},
