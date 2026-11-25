@@ -1,0 +1,41 @@
+# Môi trường ảo
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Django
+db.sqlite3
+db.sqlite3-journal
+media/
+staticfiles/
+*.log
+
+# Biến môi trường và khóa bí mật
+.env
+.env.*
+!.env.example
+!api_tests/.env.test.example
+serviceAccountKey*.json
+*firebase-adminsdk*.json
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE / hệ điều hành
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# API integration test configuration and reports
+api_tests/.env.test
+api_tests/ket_qua/
+api_tests/report*.html
+api_tests/result*.xml

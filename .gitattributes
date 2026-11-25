@@ -1,0 +1,5 @@
+# CODINGCONVENTION mục 1: mọi file văn bản dùng UTF-8 + LF, bất kể cấu hình core.autocrlf của từng máy
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.ttf binary

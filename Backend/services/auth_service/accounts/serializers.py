@@ -1,0 +1,107 @@
+import logging
+
+from django.conf import settings
+from django.contrib.auth import get_user_model
+from django.db import transaction
+from firebase_admin import auth as firebase_auth
+from rest_framework import serializers
+from rest_framework.exceptions import AuthenticationFailed
+from rest_framework_simplejwt.serializers import TokenRefreshSerializer
+
+from accounts.models import FirebaseAccount
+from soa_common.firebase import get_firebase_app
+
+User = get_user_model()
+logger = logging.getLogger(__name__)
+
+# Chấp nhận đồng hồ máy chạy backend lệch tối đa 60 giây (mức tối đa Firebase Admin cho phép),
+# tránh lỗi "Token used too early" khi đồng hồ máy dev chưa đồng bộ
+FIREBASE_CLOCK_SKEW_SECONDS = 60
+
+
+class UserSerializer(serializers.ModelSerializer):
+    full_name = serializers.CharField(source='first_name')
+
+    class Meta:
+        model = User
+        fields = ['id', 'email', 'full_name', 'date_joined']
+
+
+class FirebaseLoginSerializer(serializers.Serializer):
+    id_token = serializers.CharField(write_only=True)
+    # Chỉ gửi khi vừa đăng ký, để lưu họ tên người dùng nhập trên form
+    full_name = serializers.CharField(max_length=150, required=False, allow_blank=True, write_only=True)
+
+    def validate_id_token(self, value):
+        get_firebase_app()
+        try:
+            claims = firebase_auth.verify_id_token(value, clock_skew_seconds=FIREBASE_CLOCK_SKEW_SECONDS)
+        except (ValueError, firebase_auth.InvalidIdTokenError, firebase_auth.CertificateFetchError) as error:
+            logger.warning('Firebase ID token rejected: %s: %s', type(error).__name__, error)
+            message = 'Phiên đăng nhập Firebase không hợp lệ hoặc đã hết hạn.'
+            if settings.DEBUG:
+                message = f'{message} ({type(error).__name__}: {error})'
+            raise serializers.ValidationError(message) from error
+        # Tài khoản email/mật khẩu phải xác thực email; tài khoản Google không cần kiểm tra
+        sign_in_provider = claims.get('firebase', {}).get('sign_in_provider')
+        if sign_in_provider == 'password' and claims.get('email_verified') is not True:
+            raise serializers.ValidationError(
+                {'email': 'Email chưa được xác thực. Vui lòng mở hộp thư và bấm link xác thực.'}
+            )
+        if not claims.get('email'):
+            raise serializers.ValidationError('Tài khoản Firebase chưa có email.')
+        return claims
+
+    def save(self):
+        claims = self.validated_data['id_token']
+        uid = claims['uid']
+        email = claims['email'].strip().lower()
+        full_name = (self.validated_data.get('full_name') or claims.get('name') or '').strip()[:150]
+
+        with transaction.atomic():
+            account = FirebaseAccount.objects.select_related('user').filter(uid=uid).first()
+            if account:
+                user = account.user
+            else:
+                # Firebase bảo đảm mỗi email chỉ có một tài khoản, nên liên kết theo email là an toàn
+                user = User.objects.filter(username=email).first()
+                if user is None:
+                    user = User(username=email, email=email, first_name=full_name)
+                    # Mật khẩu chỉ nằm ở Firebase, không lưu bản thứ hai trong database
+                    user.set_unusable_password()
+                    user.save()
+                    FirebaseAccount.objects.create(user=user, uid=uid)
+                else:
+                    # Firebase may issue a new UID after an account is deleted and
+                    # recreated with the same verified email. Rebind only when the
+                    # previous Firebase identity no longer exists.
+                    account = FirebaseAccount.objects.filter(user=user).first()
+                    if account is None:
+                        FirebaseAccount.objects.create(user=user, uid=uid)
+                    elif account.uid != uid:
+                        if not claims.get('email_verified', False):
+                            raise serializers.ValidationError(
+                                {'email': 'Verify the email before restoring this account link.'}
+                            )
+                        try:
+                            firebase_auth.get_user(account.uid)
+                        except firebase_auth.UserNotFoundError:
+                            account.uid = uid
+                            account.save(update_fields=['uid'])
+                        else:
+                            raise serializers.ValidationError(
+                                {'email': 'This email is linked to another Firebase account.'}
+                            )
+
+            if full_name and not user.first_name:
+                user.first_name = full_name
+                user.save(update_fields=['first_name'])
+        return user
+
+
+class SafeTokenRefreshSerializer(TokenRefreshSerializer):
+    def validate(self, attrs):
+        try:
+            return super().validate(attrs)
+        except User.DoesNotExist as error:
+            raise AuthenticationFailed('Tài khoản không còn tồn tại.') from error
